@@ -32,6 +32,7 @@ from tuneavideo.util import save_videos_grid, ddim_inversion
 from einops import rearrange
 
 from dependent_noise import dependent_noise_sampler
+from dependent_ddim import DDIMScheduler_dependent
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -77,6 +78,7 @@ def main(
     ar_sample: bool = False,
     ar_coeff: float = 0.1,
     eta: float = 0.0,
+    dependent_weights: float=0.0
 ):
     *_, config = inspect.getargvalues(inspect.currentframe())
 
@@ -92,8 +94,8 @@ def main(
             window_size=window_size,
             ar_sample=ar_sample,
             ar_coeff=ar_coeff)
-    output_dir = output_dir + '_dependent{d}_dr{dr}_ws{ws}_ar{ar}_ac{ac}_eta{e}'.format(
-        d=dependent, dr=decay_rate, ws=window_size, ar=ar_sample, ac=ar_coeff, e=eta
+    output_dir = output_dir + '_dependent{d}_dr{dr}_ws{ws}_ar{ar}_ac{ac}_eta{e}_dw{dw}'.format(
+        d=dependent, dr=decay_rate, ws=window_size, ar=ar_sample, ac=ar_coeff, e=eta, dw=dependent_weights
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -189,7 +191,7 @@ def main(
     # Get the validation pipeline
     validation_pipeline = TuneAVideoPipeline(
         vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
-        scheduler=DDIMScheduler.from_pretrained(pretrained_model_path, subfolder="scheduler")
+        scheduler=DDIMScheduler_dependent.from_pretrained(pretrained_model_path, subfolder="scheduler")
     )
     validation_pipeline.enable_vae_slicing()
     ### TODO:
@@ -354,7 +356,8 @@ def main(
                             ### TODO:
                             ddim_inv_latent = ddim_inversion(
                                 validation_pipeline, ddim_inv_scheduler, video_latent=latents,
-                                num_inv_steps=validation_data.num_inv_steps, prompt="")[-1].to(weight_dtype)
+                                num_inv_steps=validation_data.num_inv_steps, prompt="",
+                                dependent=dependent, dependent_sampler=dep_noise_sampler, dependent_weights=dependent_weights)[-1].to(weight_dtype)
                             torch.save(ddim_inv_latent, inv_latents_path)
 
                         #### do the denoising according to the prompt
@@ -405,6 +408,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_frames", default=60, type=int,
                     help="Limit for the maximal number of frames. In HumanML3D and KIT this field is ignored.")
     parser.add_argument("--eta", default=0.0, type=float)
+    parser.add_argument("--dependent_weights", default=0.0, type=float,
+                        help='weights in the ddim inversion (linear combination)')
 
     args = parser.parse_args()
 
@@ -415,5 +420,6 @@ if __name__ == "__main__":
         window_size=args.window_size,
         ar_sample=args.ar_sample,
         ar_coeff=args.ar_coeff,
-        eta=args.eta
+        eta=args.eta,
+        dependent_weights=args.dependent_weights
         )

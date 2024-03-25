@@ -1,4 +1,4 @@
-pretrained_model_path: "/data/stable-diffusion/stable-diffusion-v1-5"
+pretrained_model_path: "/home/r11user3/Yuxi/Video-P2P/data/stable-diffusion-v1-5"
 output_dir: "./outputs/tiger-forest"
 
 train_data:

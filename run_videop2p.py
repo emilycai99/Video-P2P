@@ -23,8 +23,12 @@ import cv2
 import argparse
 from omegaconf import OmegaConf
 
+from dependent_ddim import DDIMScheduler_dependent
+from dependent_noise import dependent_noise_sampler
+
 ### TODO:
-scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+scheduler = DDIMScheduler_dependent(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+# scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
 MY_TOKEN = ''
 LOW_RESOURCE = False
 NUM_DDIM_STEPS = 50
@@ -49,8 +53,29 @@ def main(
     video_len: int = 8,
     fast: bool = False,
     mixed_precision: str = 'fp32',
+    dependent: bool = False,
+    dependent_p2p: bool = False,
+    num_frames: int = 60,
+    decay_rate: float = 0.1,
+    window_size: int = 60,
+    ar_sample: bool = False,
+    ar_coeff: float = 0.1,
+    eta: float = 0.1,
+    dependent_weights: float=0.0,
 ):
-    output_folder = os.path.join(pretrained_model_path, 'results')
+    ################### new ##########################################
+    ### get the dependent noise sampler
+    dep_noise_sampler = dependent_noise_sampler(num_frames=num_frames,
+            decay_rate=decay_rate,
+            window_size=window_size,
+            ar_sample=ar_sample,
+            ar_coeff=ar_coeff)
+    
+    pretrained_model_path = pretrained_model_path + '_dependent{d}_dr{dr}_ws{ws}_ar{ar}_ac{ac}_eta{e}_dw{dw}'.format(
+        d=dependent, dr=decay_rate, ws=window_size, ar=ar_sample, ac=ar_coeff, e=eta, dw=dependent_weights
+    )
+
+    output_folder = os.path.join(pretrained_model_path, 'results_dp{}'.format(dependent_p2p))
     if fast:
         save_name_1 = os.path.join(output_folder, 'inversion_fast.gif')
         save_name_2 = os.path.join(output_folder, '{}_fast.gif'.format(save_name))
@@ -439,6 +464,11 @@ def main(
         
         def get_noise_pred_single(self, latents, t, context):
             noise_pred = self.model.unet(latents, t, encoder_hidden_states=context)["sample"]
+            ################ new ################################################################
+            if self.dependent and self.dependent_sampler is not None:
+                ar_noise = self.dependent_sampler.sample(noise_pred)
+                noise_pred = (1 - self.dependent_weights) * noise_pred + self.dependent_weights * ar_noise
+            
             return noise_pred
 
         def get_noise_pred(self, latents, t, is_forward=True, context=None):
@@ -447,6 +477,12 @@ def main(
                 context = self.context
             guidance_scale = 1 if is_forward else GUIDANCE_SCALE
             noise_pred = self.model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
+            
+            ##################### new ####################################################
+            if self.dependent and self.dependent_sampler is not None:
+                ar_noise = self.dependent_sampler.sample(noise_pred)
+                noise_pred = (1 - self.dependent_weights) * noise_pred + self.dependent_weights * ar_noise
+            
             noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
             if is_forward:
@@ -598,7 +634,7 @@ def main(
                 print("Null-text optimization...")
             return (image_gt, image_rec), ddim_latents[-1], None
         
-        def __init__(self, model):
+        def __init__(self, model, dependent=False, dependent_sampler=None, dependent_weights=0.0):
             scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False,
                                     set_alpha_to_one=False)
             self.model = model
@@ -606,8 +642,13 @@ def main(
             self.model.scheduler.set_timesteps(NUM_DDIM_STEPS)
             self.prompt = None
             self.context = None
+            
+            self.dependent = dependent
+            self.dependent_sampler = dependent_sampler
+            self.dependent_weights = dependent_weights
 
-    null_inversion = NullInversion(ldm_stable)
+    null_inversion = NullInversion(ldm_stable, 
+                                   dependent=dependent_p2p, dependent_sampler=dep_noise_sampler, dependent_weights=dependent_weights)
 
     ###############
     # Custom APIs:
@@ -644,6 +685,9 @@ def main(
             controller = controller,
             video_length=video_len,
             fast=fast,
+            dependent=dependent_p2p,
+            dependent_sampler=dep_noise_sampler,
+            eta=eta
         ).videos
     sequence1 = rearrange(sequence[0], "c t h w -> t h w c")
     sequence2 = rearrange(sequence[1], "c t h w -> t h w c")
@@ -660,6 +704,30 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./configs/videop2p.yaml")
     parser.add_argument("--fast", action='store_true')
+    
+    ######## new argument ################################
+    parser.add_argument("--dependent", default=False, action="store_true")
+    parser.add_argument("--dependent_p2p", default=False, action="store_true")
+    parser.add_argument("--ar_sample", default=False, action="store_true")
+    parser.add_argument("--decay_rate", default=0.1, type=float)
+    parser.add_argument("--window_size", default=60, type=int)
+    parser.add_argument("--ar_coeff", default=0.1, type=float)
+    parser.add_argument("--loss_sig", default=False, action="store_true")
+    parser.add_argument("--num_frames", default=60, type=int,
+                    help="Limit for the maximal number of frames. In HumanML3D and KIT this field is ignored.")
+    parser.add_argument("--eta", default=0.0, type=float)
+    parser.add_argument("--dependent_weights", default=0.0, type=float,
+                        help='weights in the ddim inversion (linear combination)')
+    
     args = parser.parse_args()
 
-    main(**OmegaConf.load(args.config), fast=args.fast)
+    main(**OmegaConf.load(args.config), fast=args.fast,
+        dependent=args.dependent,
+        dependent_p2p=args.dependent_p2p,
+        num_frames=args.num_frames,
+        decay_rate=args.decay_rate,
+        window_size=args.window_size,
+        ar_sample=args.ar_sample,
+        ar_coeff=args.ar_coeff,
+        eta=args.eta,
+        dependent_weights=args.dependent_weights)

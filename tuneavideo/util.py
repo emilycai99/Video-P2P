@@ -12,6 +12,7 @@ from tqdm import tqdm
 from einops import rearrange
 
 
+
 def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=4, fps=8):
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
@@ -61,26 +62,31 @@ def next_step(model_output: Union[torch.FloatTensor, np.ndarray], timestep: int,
     return next_sample
 
 
-def get_noise_pred_single(latents, t, context, unet):
+def get_noise_pred_single(latents, t, context, unet, dependent=False, dependent_sampler=None, dependent_weights=0.0):
     noise_pred = unet(latents, t, encoder_hidden_states=context)["sample"]
+    if dependent and dependent_sampler is not None:
+        ar_noise = dependent_sampler.sample(noise_pred)
+        noise_pred = (1 - dependent_weights) * noise_pred + dependent_weights * ar_noise
     return noise_pred
 
 
 @torch.no_grad()
-def ddim_loop(pipeline, ddim_scheduler, latent, num_inv_steps, prompt):
+def ddim_loop(pipeline, ddim_scheduler, latent, num_inv_steps, prompt, dependent=False, dependent_sampler=None, dependent_weights=0.0):
     context = init_prompt(prompt, pipeline)
     uncond_embeddings, cond_embeddings = context.chunk(2)
     all_latent = [latent]
     latent = latent.clone().detach()
     for i in tqdm(range(num_inv_steps)):
         t = ddim_scheduler.timesteps[len(ddim_scheduler.timesteps) - i - 1]
-        noise_pred = get_noise_pred_single(latent, t, cond_embeddings, pipeline.unet)
+        noise_pred = get_noise_pred_single(latent, t, cond_embeddings, pipeline.unet, 
+                                           dependent=dependent, dependent_sampler=dependent_sampler, dependent_weights=dependent_weights)
         latent = next_step(noise_pred, t, latent, ddim_scheduler)
         all_latent.append(latent)
     return all_latent
 
 
 @torch.no_grad()
-def ddim_inversion(pipeline, ddim_scheduler, video_latent, num_inv_steps, prompt=""):
-    ddim_latents = ddim_loop(pipeline, ddim_scheduler, video_latent, num_inv_steps, prompt)
+def ddim_inversion(pipeline, ddim_scheduler, video_latent, num_inv_steps, prompt="", dependent=False, dependent_sampler=None, dependent_weights=0.0):
+    ddim_latents = ddim_loop(pipeline, ddim_scheduler, video_latent, num_inv_steps, prompt,
+                             dependent=dependent, dependent_sampler=dependent_sampler, dependent_weights=dependent_weights)
     return ddim_latents
