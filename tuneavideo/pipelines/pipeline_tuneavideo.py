@@ -298,6 +298,7 @@ class TuneAVideoPipeline(DiffusionPipeline):
         if latents is None:
             rand_device = "cpu" if device.type == "mps" else device
 
+            ### TODO:
             if isinstance(generator, list):
                 shape = (1,) + shape[1:]
                 latents = [
@@ -339,6 +340,8 @@ class TuneAVideoPipeline(DiffusionPipeline):
         controller=None,
         multi=False,
         fast=False,
+        dependent=False,
+        dependent_sampler=None,
         **kwargs,
     ):
         # Default height and width to unet
@@ -412,7 +415,9 @@ class TuneAVideoPipeline(DiffusionPipeline):
                         noise_pred[0] = noise_pred_text[0]
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                ### TODO:
+                ### denoise for the inference
+                latents = self.scheduler.step(noise_pred, t, latents, dependent=dependent, dependent_sampler=dependent_sampler, **extra_step_kwargs).prev_sample
                 weight_type = latents.dtype
 
                 if controller is not None:

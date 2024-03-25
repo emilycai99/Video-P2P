@@ -31,6 +31,8 @@ from tuneavideo.pipelines.pipeline_tuneavideo import TuneAVideoPipeline
 from tuneavideo.util import save_videos_grid, ddim_inversion
 from einops import rearrange
 
+from dependent_noise import dependent_noise_sampler
+
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.10.0.dev0")
@@ -68,12 +70,30 @@ def main(
     use_8bit_adam: bool = False,
     enable_xformers_memory_efficient_attention: bool = True,
     seed: Optional[int] = None,
+    dependent: bool = False,
+    num_frames: int = 60,
+    decay_rate: float = 0.1,
+    window_size: int = 60,
+    ar_sample: bool = False,
+    ar_coeff: float = 0.1,
+    eta: float = 0.0,
 ):
     *_, config = inspect.getargvalues(inspect.currentframe())
 
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
+    )
+    
+    ################### new ##########################################
+    ### get the dependent noise sampler
+    dep_noise_sampler = dependent_noise_sampler(num_frames=num_frames,
+            decay_rate=decay_rate,
+            window_size=window_size,
+            ar_sample=ar_sample,
+            ar_coeff=ar_coeff)
+    output_dir = output_dir + '_dependent{d}_dr{dr}_ws{ws}_ar{ar}_ac{ac}_eta{e}'.format(
+        d=dependent, dr=decay_rate, ws=window_size, ar=ar_sample, ac=ar_coeff, e=eta
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -172,6 +192,7 @@ def main(
         scheduler=DDIMScheduler.from_pretrained(pretrained_model_path, subfolder="scheduler")
     )
     validation_pipeline.enable_vae_slicing()
+    ### TODO:
     ddim_inv_scheduler = DDIMScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
     ddim_inv_scheduler.set_timesteps(validation_data.num_inv_steps)
 
@@ -264,7 +285,12 @@ def main(
                 latents = latents * 0.18215
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
+                ### TODO:Done
+                if dependent:
+                    noise = dep_noise_sampler.sample(latents)
+                else:
+                    noise = torch.randn_like(latents)
+                # noise.shape = [1, 4, 8, 64, 64] = bsz x channel x frame x height x width
                 bsz = latents.shape[0]
                 # Sample a random timestep for each video
                 timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
@@ -272,6 +298,7 @@ def main(
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
+                ### TODO:Done
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # Get the text embedding for conditioning
@@ -323,13 +350,19 @@ def main(
                         ddim_inv_latent = None
                         if validation_data.use_inv_latent:
                             inv_latents_path = os.path.join(output_dir, f"inv_latents/ddim_latent-{global_step}.pt")
+                            ### ddim inversion for the original sample
+                            ### TODO:
                             ddim_inv_latent = ddim_inversion(
                                 validation_pipeline, ddim_inv_scheduler, video_latent=latents,
                                 num_inv_steps=validation_data.num_inv_steps, prompt="")[-1].to(weight_dtype)
                             torch.save(ddim_inv_latent, inv_latents_path)
 
+                        #### do the denoising according to the prompt
+                        ### TODO:
                         for idx, prompt in enumerate(validation_data.prompts):
                             sample = validation_pipeline(prompt, generator=generator, latents=ddim_inv_latent,
+                                                         dependent=dependent, dependent_sampler=dep_noise_sampler,
+                                                         eta=eta,
                                                          **validation_data).videos
                             save_videos_grid(sample, f"{output_dir}/samples/sample-{global_step}/{prompt}.gif")
                             samples.append(sample)
@@ -362,6 +395,25 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./configs/tuneavideo.yaml")
+    ######## new argument ################################
+    parser.add_argument("--dependent", default=False, action="store_true")
+    parser.add_argument("--ar_sample", default=False, action="store_true")
+    parser.add_argument("--decay_rate", default=0.1, type=float)
+    parser.add_argument("--window_size", default=60, type=int)
+    parser.add_argument("--ar_coeff", default=0.1, type=float)
+    parser.add_argument("--loss_sig", default=False, action="store_true")
+    parser.add_argument("--num_frames", default=60, type=int,
+                    help="Limit for the maximal number of frames. In HumanML3D and KIT this field is ignored.")
+    parser.add_argument("--eta", default=0.0, type=float)
+
     args = parser.parse_args()
 
-    main(**OmegaConf.load(args.config))
+    main(**OmegaConf.load(args.config),
+        dependent=args.dependent,
+        num_frames=args.num_frames,
+        decay_rate=args.decay_rate,
+        window_size=args.window_size,
+        ar_sample=args.ar_sample,
+        ar_coeff=args.ar_coeff,
+        eta=args.eta
+        )
